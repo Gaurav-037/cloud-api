@@ -11,6 +11,77 @@ class WhatsappService extends EventEmitter {
         this.clients = new Map();
         this.qrCodes = new Map();
         this.initializingClients = new Map(); // Track initializing clients
+        this.sessionRestoreTimeouts = new Map();
+    }
+
+    async restoreSession(userId, phoneNumber) {
+        // Clear any existing restore timeout
+        if (this.sessionRestoreTimeouts.has(userId)) {
+            clearTimeout(this.sessionRestoreTimeouts.get(userId));
+            this.sessionRestoreTimeouts.delete(userId);
+        }
+
+        const sessionDir = path.join(__dirname, '../../sessions', userId);
+        
+        if (!fs.existsSync(sessionDir)) {
+            throw new Error('No session data found');
+        }
+
+        console.log(`Restoring session for user ${userId}`);
+
+        if (this.clients.get(userId)) {
+            await this.disconnectClient(userId);
+        }
+
+        const client = new Client({
+            authStrategy: new LocalAuth({
+                clientId: userId,
+                dataPath: sessionDir
+            }),
+            puppeteer: {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ]
+            }
+        });
+
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(async () => {
+                console.log(`Session restore timed out for user ${userId}`);
+                await this.disconnectClient(userId);
+                reject(new Error('Session restore timed out'));
+            }, 30000); // 30 seconds timeout
+
+            client.on('ready', async () => {
+                clearTimeout(timeout);
+                console.log(`Session restored successfully for user ${userId}`);
+                await User.findByIdAndUpdate(userId, {
+                    isAuthenticated: true,
+                    lastActive: new Date()
+                });
+                this.clients.set(userId, client);
+                resolve(client);
+            });
+
+            client.on('auth_failure', async () => {
+                clearTimeout(timeout);
+                console.log(`Authentication failed during restore for user ${userId}`);
+                await this.disconnectClient(userId);
+                reject(new Error('Authentication failed'));
+            });
+
+            this.setupClientEvents(client, userId, phoneNumber);
+            client.initialize().catch(async (error) => {
+                clearTimeout(timeout);
+                console.error(`Failed to initialize client for user ${userId}:`, error);
+                await this.disconnectClient(userId);
+                reject(error);
+            });
+        });
     }
 
     isClientInitialized(userId) {
@@ -174,19 +245,30 @@ class WhatsappService extends EventEmitter {
 
         client.on('disconnected', async (reason) => {
             console.log(`Client disconnected for user ${userId}:`, reason);
-            try {
-                await User.findByIdAndUpdate(userId, {
-                    isAuthenticated: false,
-                    lastActive: new Date(),
-                    whatsappSessionData: null
-                });
-                this.clients.delete(userId);
-                this.qrCodes.delete(userId);
-                this.emit('disconnected', { userId, reason });
-            } catch (error) {
-                console.error('Error updating user disconnection:', error);
-            }
+            
+            // Set a timeout to attempt session restore
+            const timeout = setTimeout(async () => {
+                try {
+                    console.log(`Attempting to restore session for user ${userId} after disconnect`);
+                    await this.restoreSession(userId, phoneNumber);
+                } catch (error) {
+                    console.log(`Failed to restore session after disconnect for user ${userId}:`, error.message);
+                    await User.findByIdAndUpdate(userId, { isAuthenticated: false });
+                }
+            }, 5000); // Wait 5 seconds before attempting restore
+            
+            this.sessionRestoreTimeouts.set(userId, timeout);
+            
+            // Update user status
+            await User.findByIdAndUpdate(userId, {
+                lastActive: new Date()
+            });
+            
+
+            
+            this.emit('disconnected', { userId, reason });
         });
+    
     }
 
     async sendMessage(userId, recipientNumber, message) {

@@ -1,4 +1,5 @@
-const User = require('../models/User.js');
+const User = require('../models/User');
+const WhatsappService = require('../services/whatsappService');
 
 const authMiddleware = async (req, res, next) => {
     try {
@@ -14,8 +15,13 @@ const authMiddleware = async (req, res, next) => {
             return res.status(401).json({ error: 'Invalid API key' });
         }
 
-        if (!user.isAuthenticated) {
-            return res.status(403).json({ error: 'User not authenticated' });
+        // Check both database authentication and WhatsApp client connection
+        if (!user.isAuthenticated || !WhatsappService.isClientInitialized(user._id.toString())) {
+            // Reset authentication status if client is not connected
+            await User.findByIdAndUpdate(user._id, { isAuthenticated: false });
+            return res.status(403).json({ 
+                error: 'WhatsApp client not authenticated. Please reinitialize and scan QR code.' 
+            });
         }
 
         req.user = user;

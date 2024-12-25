@@ -1,11 +1,11 @@
-const User = require('../models/User.js');
-const WhatsappService = require('../services/whatsappService.js');
+const User = require('../models/User');
+const WhatsappService = require('../services/whatsappService');
 
 const messageController = {
     async sendMessage(req, res) {
         try {
             const { recipientNumber, message } = req.body;
-            const userId = req.user._id;
+            const userId = req.user._id.toString();
 
             if (!recipientNumber || !message) {
                 return res.status(400).json({ 
@@ -13,9 +13,23 @@ const messageController = {
                 });
             }
 
+            // Check client status and try to reconnect if needed
+            if (!WhatsappService.isClientInitialized(userId)) {
+                console.log('Client not initialized, attempting to restore session...');
+                try {
+                    await WhatsappService.restoreSession(userId, req.user.phoneNumber);
+                } catch (error) {
+                    console.error('Session restoration failed:', error);
+                    return res.status(403).json({ 
+                        error: 'WhatsApp session expired. Please reinitialize and scan QR code.' 
+                    });
+                }
+            }
+
+            // Double check client status after potential restoration
             if (!WhatsappService.isClientInitialized(userId)) {
                 return res.status(403).json({ 
-                    error: 'WhatsApp client not authenticated' 
+                    error: 'Failed to initialize WhatsApp client. Please reinitialize.' 
                 });
             }
 
@@ -31,7 +45,7 @@ const messageController = {
             });
         } catch (error) {
             console.error('Message sending error:', error);
-            res.status(500).json({ error: 'Failed to send message' });
+            res.status(500).json({ error: error.message });
         }
     }
 };

@@ -1,0 +1,121 @@
+class WhatsappService extends EventEmitter {
+    // ... (previous code remains the same)
+
+    async restoreSession(userId, phoneNumber) {
+        console.log(`Attempting to restore session for user ${userId}`);
+        
+        if (this.clients.get(userId)) {
+            console.log('Client already exists, destroying old client...');
+            await this.disconnectClient(userId);
+        }
+
+        const sessionDir = path.join(__dirname, '../../sessions', userId);
+        
+        if (!fs.existsSync(sessionDir)) {
+            throw new Error('No session data found');
+        }
+
+        console.log('Creating new client with existing session...');
+        const client = new Client({
+            authStrategy: new LocalAuth({
+                clientId: userId,
+                dataPath: sessionDir
+            }),
+            puppeteer: {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu'
+                ]
+            }
+        });
+
+        return new Promise((resolve, reject) => {
+            client.on('ready', async () => {
+                console.log('Client restored and ready');
+                await User.findByIdAndUpdate(userId, {
+                    isAuthenticated: true,
+                    lastActive: new Date()
+                });
+                resolve(client);
+            });
+
+            client.on('auth_failure', async () => {
+                console.log('Auth failed during restoration');
+                await this.disconnectClient(userId);
+                reject(new Error('Authentication failed'));
+            });
+
+            client.initialize().catch(async (error) => {
+                console.error('Failed to initialize client:', error);
+                await this.disconnectClient(userId);
+                reject(error);
+            });
+
+            // Set timeout for initialization
+            setTimeout(async () => {
+                if (!client.info) {
+                    console.log('Client initialization timed out');
+                    await this.disconnectClient(userId);
+                    reject(new Error('Client initialization timed out'));
+                }
+            }, 30000); // 30 seconds timeout
+
+            this.clients.set(userId, client);
+        });
+    }
+
+    setupClientEvents(client, userId, phoneNumber) {
+        client.on('qr', async (qr) => {
+            try {
+                const qrDataURL = await qrcode.toDataURL(qr);
+                this.qrCodes.set(userId, qrDataURL);
+                await User.findByIdAndUpdate(userId, {
+                    isAuthenticated: false,
+                    lastActive: new Date()
+                });
+                this.emit('qr', { userId, qrDataURL });
+            } catch (error) {
+                console.error('QR generation error:', error);
+            }
+        });
+
+        client.on('ready', async () => {
+            console.log(`Client ready for user ${userId}`);
+            try {
+                await User.findByIdAndUpdate(userId, {
+                    isAuthenticated: true,
+                    lastActive: new Date()
+                });
+                this.emit('ready', { userId, phoneNumber });
+            } catch (error) {
+                console.error('Error updating user ready status:', error);
+            }
+        });
+
+        client.on('authenticated', async (session) => {
+            console.log(`Client authenticated for user ${userId}`);
+            try {
+                // Save session data
+                // const sessionDir = path.join(__dirname, '../../sessions', userId);
+                await User.findByIdAndUpdate(userId, {
+                    isAuthenticated: true,
+                    lastActive: new Date(),
+                    whatsappSessionData: JSON.stringify(session)
+                });
+                this.emit('authenticated', { userId, phoneNumber });
+            } catch (error) {
+                console.error('Error updating user authentication:', error);
+            }
+        });
+
+        // ... (rest of the event handlers remain the same)
+    }
+
+    isClientInitialized(userId) {
+        const client = this.clients.get(userId);
+        return client && client.info && client.info.wid && this.clients.has(userId);
+    }
+}

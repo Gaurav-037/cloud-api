@@ -17,13 +17,16 @@ const authController = {
                 await user.save();
             }
 
-            // Initialize WhatsApp client
+            // Force disconnect existing session if any
+            await WhatsappService.disconnectClient(user._id.toString());
+
+            // Initialize new WhatsApp client
             await WhatsappService.initializeClient(user._id.toString(), phoneNumber);
 
             res.json({ 
                 userId: user._id,
                 apiKey: user.apiKey,
-                message: 'Scan QR code to authenticate' 
+                message: 'Please scan QR code to authenticate' 
             });
         } catch (error) {
             console.error('Session initialization error:', error);
